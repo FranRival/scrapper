@@ -2,6 +2,7 @@ import os
 import re
 import time
 import requests
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import tkinter as tk
 from tkinter import filedialog, scrolledtext
@@ -9,9 +10,12 @@ from tkinter import filedialog, scrolledtext
 TIMEOUT = 30
 DELAY = 1.0
 
-# URLs del sitio
-LOGIN_PAGE_URL = "https://www.poringa.net/login"
-LOGIN_URL = "https://www.poringa.net/"
+# La URL de login ahora se captura en la interfaz (campo "URL de login").
+# El POST se envía a la raíz del mismo dominio (igual que antes).
+def urls_desde_login(login_page_url):
+    p = urlparse(login_page_url)
+    origin = f"{p.scheme}://{p.netloc}"
+    return origin, origin + "/"
 
 HEADERS_COMUNES = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -94,14 +98,14 @@ def invalidar_login(event=None):
 # =========================
 # LOGIN
 # =========================
-def sesion_activa(sess):
+def sesion_activa(sess, login_page_url):
     """
     Verifica que realmente estemos logueados: al pedir la página de login,
     si el sitio todavía muestra el formulario con el campo de contraseña,
     la sesión NO está iniciada. Ajusta si el sitio se comporta distinto.
     """
     try:
-        r = sess.get(LOGIN_PAGE_URL, headers=HEADERS_COMUNES, timeout=TIMEOUT)
+        r = sess.get(login_page_url, headers=HEADERS_COMUNES, timeout=TIMEOUT)
         r.raise_for_status()
     except Exception as e:
         log(f"❌ Error verificando sesión: {e}")
@@ -112,9 +116,10 @@ def sesion_activa(sess):
     return not hay_form_login
 
 
-def hacer_login(sess, usuario, password):
+def hacer_login(sess, login_page_url, usuario, password):
+    origin, login_post_url = urls_desde_login(login_page_url)
     try:
-        r0 = sess.get(LOGIN_PAGE_URL, headers=HEADERS_COMUNES, timeout=TIMEOUT)
+        r0 = sess.get(login_page_url, headers=HEADERS_COMUNES, timeout=TIMEOUT)
         r0.raise_for_status()
     except Exception as e:
         log(f"❌ Error al cargar la página de login: {e}")
@@ -130,13 +135,13 @@ def hacer_login(sess, usuario, password):
         **HEADERS_COMUNES,
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": "https://www.poringa.net",
-        "Referer": LOGIN_PAGE_URL,
+        "Origin": origin,
+        "Referer": login_page_url,
         "X-Requested-With": "XMLHttpRequest",
     }
 
     try:
-        r = sess.post(LOGIN_URL, data=payload, headers=headers, timeout=TIMEOUT)
+        r = sess.post(login_post_url, data=payload, headers=headers, timeout=TIMEOUT)
         r.raise_for_status()
     except Exception as e:
         log(f"❌ Error al hacer login: {e}")
@@ -151,7 +156,7 @@ def hacer_login(sess, usuario, password):
         return False
 
     # Confirmación final: ¿el sitio nos reconoce como logueados?
-    if not sesion_activa(sess):
+    if not sesion_activa(sess, login_page_url):
         log("❌ El sitio sigue mostrando el formulario de login.")
         return False
 
@@ -160,9 +165,13 @@ def hacer_login(sess, usuario, password):
 
 def probar_login():
     global session, sesion_ok
+    login_url = entry_url.get().strip()
     usuario = entry_user.get().strip()
     password = entry_pass.get().strip()
 
+    if not login_url.lower().startswith(("http://", "https://")):
+        set_estado("rojo", "URL de login inválida (usa https://...)")
+        return
     if not usuario or not password:
         set_estado("rojo", "Ingresa usuario y contraseña")
         return
@@ -175,7 +184,7 @@ def probar_login():
     root.update()
 
     log("🔐 Iniciando sesión...")
-    ok = hacer_login(session, usuario, password)
+    ok = hacer_login(session, login_url, usuario, password)
     btn_login.config(state="normal")
 
     if ok:
@@ -270,7 +279,7 @@ def elegir_carpeta(entry):
 
 root = tk.Tk()
 root.title("Scraper HTML por lotes (con login)")
-root.geometry("700x640")
+root.geometry("700x700")
 
 frame = tk.Frame(root)
 frame.pack(pady=10)
@@ -292,17 +301,23 @@ tk.Label(frame, text="Usuario:").grid(row=4, column=0, sticky="w", pady=(10, 0))
 entry_user = tk.Entry(frame, width=40)
 entry_user.grid(row=5, column=0, sticky="w")
 
-tk.Label(frame, text="Contraseña:").grid(row=6, column=0, sticky="w", pady=(10, 0))
+tk.Label(frame, text="URL de login:").grid(row=6, column=0, sticky="w", pady=(10, 0))
+entry_url = tk.Entry(frame, width=60)
+entry_url.grid(row=7, column=0, sticky="w")
+entry_url.insert(0, "https://www.poringa.net/login")
+
+tk.Label(frame, text="Contraseña:").grid(row=8, column=0, sticky="w", pady=(10, 0))
 entry_pass = tk.Entry(frame, width=40, show="*")
-entry_pass.grid(row=7, column=0, sticky="w")
+entry_pass.grid(row=9, column=0, sticky="w")
 
 # Si cambian credenciales, se invalida el login anterior
+entry_url.bind("<Key>", invalidar_login)
 entry_user.bind("<Key>", invalidar_login)
 entry_pass.bind("<Key>", invalidar_login)
 
 # Botón de login + semáforo
 fila_login = tk.Frame(frame)
-fila_login.grid(row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
+fila_login.grid(row=10, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
 btn_login = tk.Button(fila_login, text="🔑 Iniciar sesión", command=probar_login, height=1)
 btn_login.pack(side="left")
