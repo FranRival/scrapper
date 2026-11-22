@@ -12,12 +12,16 @@ DELAY = 1.0
 
 # La URL de login ahora se captura en la interfaz (campo "URL de login").
 # El POST se envía a la raíz del mismo dominio (igual que antes).
+# Endpoint real del login (visto en DevTools del navegador)
+LOGIN_SUBMIT_PATH = "/registro/login-submit.php"
+
+
 def urls_desde_login(login_page_url):
     p = urlparse(login_page_url)
     origin = f"{p.scheme}://{p.netloc}"
     # Si la URL trae ?redirect=%2F, se respeta ese valor (parse_qs ya decodifica %2F -> /)
     redirect = parse_qs(p.query).get("redirect", ["/"])[0] or "/"
-    return origin, origin + "/", redirect
+    return origin, origin + LOGIN_SUBMIT_PATH, redirect
 
 HEADERS_COMUNES = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -252,21 +256,18 @@ def hacer_login(sess, login_page_url, usuario, password, url_prueba=None):
     nuevas = set(sess.cookies.get_dict().keys()) - cookies_antes
     log(f"🔎 Content-Type de la respuesta: {r.headers.get('Content-Type')} | "
         f"cookies nuevas tras el POST: {sorted(nuevas) or 'ninguna'}")
-    msgs = mensajes_pagina(r.text)
-    if msgs:
-        log(f"🔎 Mensajes en la respuesta: {msgs}")
-
-    tiene_pass, tiene_logout = analizar_html(r.text)
-    log(f"🔎 POST -> {login_post_url} | HTTP {r.status_code} | URL final: {r.url} | "
-        f"campo password: {tiene_pass} | enlace de cerrar sesión: {tiene_logout}")
+    log(f"🔎 POST -> {login_post_url} | HTTP {r.status_code}")
     log(f"🔎 Cookies: {list(sess.cookies.get_dict().keys())}")
 
-    if not sess.cookies.get_dict():
-        log("⚠️ No se recibieron cookies de sesión.")
+    try:
+        data = r.json()
+    except ValueError:
+        log(f"❌ La respuesta no es JSON. Inicio: {r.text[:200]!r}")
         return False
 
-    if "usuario o contraseña" in r.text.lower():
-        log("❌ Usuario o contraseña inválidos.")
+    log(f"🔎 Respuesta JSON: {data}")
+    if data.get("status") != 1:
+        log("❌ El sitio rechazó el login (status distinto de 1). Revisa usuario y contraseña.")
         return False
 
     return sesion_activa(sess, origin, url_prueba)
