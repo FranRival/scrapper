@@ -147,28 +147,57 @@ def detectar_formulario(html):
     return None
 
 
-def sesion_activa(sess, origin):
+def primera_url_prueba():
+    """Toma la primera URL de los TXT para probar con una página real."""
+    carpeta = entry_txt.get().strip()
+    if not os.path.isdir(carpeta):
+        return None
+    for f in sorted(os.listdir(carpeta)):
+        if f.endswith(".txt"):
+            try:
+                with open(os.path.join(carpeta, f), "r", encoding="utf-8") as fh:
+                    for linea in fh:
+                        if linea.strip():
+                            return linea.strip()
+            except Exception:
+                pass
+    return None
+
+
+def sesion_activa(sess, origin, url_prueba=None):
     """
-    Verifica la sesión pidiendo la página principal (no la de login, porque
-    el sitio puede seguir mostrando /login aunque ya estemos dentro).
+    Verificación fuerte: abre una URL real de tus TXT. Si el sitio te manda a
+    /login o muestra un campo de contraseña, la sesión NO está iniciada.
+    La home sola no sirve: un usuario anónimo también la ve sin formulario.
     """
+    destino = url_prueba or origin + "/"
     try:
-        r = sess.get(origin + "/", headers=HEADERS_COMUNES, timeout=TIMEOUT)
+        r = sess.get(destino, headers=HEADERS_COMUNES, timeout=TIMEOUT)
         r.raise_for_status()
     except Exception as e:
         log(f"❌ Error verificando sesión: {e}")
         return False
 
     tiene_pass, tiene_logout = analizar_html(r.text)
-    log(f"🔎 Verificación (home) -> URL final: {r.url} | campo password: {tiene_pass} "
-        f"| enlace de cerrar sesión: {tiene_logout}")
+    ruta_final = urlparse(r.url).path.lower()
+    redirigido_a_login = "/login" in ruta_final and "/login" not in urlparse(destino).path.lower()
+    log(f"🔎 Verificación -> pedí: {destino}")
+    log(f"🔎   URL final: {r.url} | redirecciones: {[h.status_code for h in r.history]} | "
+        f"campo password: {tiene_pass} | enlace de cerrar sesión: {tiene_logout}")
 
+    if not url_prueba:
+        log("⚠️ Verificación débil: selecciona primero la carpeta de TXT para probar "
+            "con una página real y evitar un falso verde.")
+
+    if redirigido_a_login:
+        log("❌ Al abrir una página real el sitio te manda al login: la sesión no quedó iniciada.")
+        return False
     if tiene_logout:
         return True
-    return not tiene_pass and "login" not in r.url.lower()
+    return not tiene_pass
 
 
-def hacer_login(sess, login_page_url, usuario, password):
+def hacer_login(sess, login_page_url, usuario, password, url_prueba=None):
     origin, login_post_url, redirect = urls_desde_login(login_page_url)
     try:
         r0 = sess.get(login_page_url, headers=HEADERS_COMUNES, timeout=TIMEOUT)
@@ -221,7 +250,7 @@ def hacer_login(sess, login_page_url, usuario, password):
         log("❌ Usuario o contraseña inválidos.")
         return False
 
-    return sesion_activa(sess, origin)
+    return sesion_activa(sess, origin, url_prueba)
 
 
 def probar_login():
@@ -245,7 +274,7 @@ def probar_login():
     root.update()
 
     log("🔐 Iniciando sesión...")
-    ok = hacer_login(session, login_url, usuario, password)
+    ok = hacer_login(session, login_url, usuario, password, primera_url_prueba())
     btn_login.config(state="normal")
 
     if ok:
@@ -304,8 +333,10 @@ def ejecutar():
                 log(f"❌ Error: {e}")
                 continue
 
-            if "login" in r.url.lower():
-                log("⚠️ Posible sesión expirada o redirección a login detectada")
+            ruta_final = urlparse(r.url).path.lower()
+            if "/login" in ruta_final and "/login" not in urlparse(url).path.lower():
+                log(f"⚠️ Redirigido a login: {url} -> {r.url} "
+                    f"(redirecciones: {[h.status_code for h in r.history]})")
                 set_estado("rojo", "Sesión expirada")
 
             nombre = obtener_nombre(html) or f"pagina_{i}"
