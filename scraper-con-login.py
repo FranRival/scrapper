@@ -117,6 +117,17 @@ def analizar_html(html):
     return tiene_pass, tiene_logout
 
 
+def mensajes_pagina(html):
+    """Extrae textos de avisos/errores que el sitio muestre en la respuesta."""
+    soup = BeautifulSoup(html, "html.parser")
+    textos = []
+    for el in soup.find_all(class_=re.compile(r"error|alert|warn|msg|message|notice|fail", re.I)):
+        t = el.get_text(" ", strip=True)
+        if t and t not in textos:
+            textos.append(t[:150])
+    return textos[:5]
+
+
 def detectar_formulario(html):
     """
     Busca en la página de login el formulario que tiene el campo de contraseña
@@ -230,12 +241,20 @@ def hacer_login(sess, login_page_url, usuario, password, url_prueba=None):
         "X-Requested-With": "XMLHttpRequest",
     }
 
+    cookies_antes = set(sess.cookies.get_dict().keys())
     try:
         r = sess.post(login_post_url, data=payload, headers=headers, timeout=TIMEOUT)
         r.raise_for_status()
     except Exception as e:
         log(f"❌ Error al hacer login: {e}")
         return False
+
+    nuevas = set(sess.cookies.get_dict().keys()) - cookies_antes
+    log(f"🔎 Content-Type de la respuesta: {r.headers.get('Content-Type')} | "
+        f"cookies nuevas tras el POST: {sorted(nuevas) or 'ninguna'}")
+    msgs = mensajes_pagina(r.text)
+    if msgs:
+        log(f"🔎 Mensajes en la respuesta: {msgs}")
 
     tiene_pass, tiene_logout = analizar_html(r.text)
     log(f"🔎 POST -> {login_post_url} | HTTP {r.status_code} | URL final: {r.url} | "
@@ -257,7 +276,7 @@ def probar_login():
     global session, sesion_ok
     login_url = entry_url.get().strip()
     usuario = entry_user.get().strip()
-    password = entry_pass.get().strip()
+    password = entry_pass.get()
 
     if not login_url.lower().startswith(("http://", "https://")):
         set_estado("rojo", "URL de login inválida (usa https://...)")
