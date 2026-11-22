@@ -2,7 +2,7 @@ import os
 import re
 import time
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, urljoin
 from bs4 import BeautifulSoup
 import tkinter as tk
 from tkinter import filedialog, scrolledtext
@@ -15,7 +15,9 @@ DELAY = 1.0
 def urls_desde_login(login_page_url):
     p = urlparse(login_page_url)
     origin = f"{p.scheme}://{p.netloc}"
-    return origin, origin + "/"
+    # Si la URL trae ?redirect=%2F, se respeta ese valor (parse_qs ya decodifica %2F -> /)
+    redirect = parse_qs(p.query).get("redirect", ["/"])[0] or "/"
+    return origin, origin + "/", redirect
 
 HEADERS_COMUNES = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -98,26 +100,76 @@ def invalidar_login(event=None):
 # =========================
 # LOGIN
 # =========================
-def sesion_activa(sess, login_page_url):
+MARCAS_LOGOUT = ("logout", "salir", "cerrar sesi", "cerrar-sesi", "desconect")
+
+
+def analizar_html(html):
+    """Devuelve (tiene_campo_password, tiene_marca_de_sesion_iniciada)."""
+    soup = BeautifulSoup(html, "html.parser")
+    tiene_pass = soup.find("input", {"type": "password"}) is not None
+    tiene_logout = False
+    for a in soup.find_all("a"):
+        href = (a.get("href") or "").lower()
+        txt = a.get_text(" ", strip=True).lower()
+        if any(m in href or m in txt for m in MARCAS_LOGOUT):
+            tiene_logout = True
+            break
+    return tiene_pass, tiene_logout
+
+
+def detectar_formulario(html):
     """
-    Verifica que realmente estemos logueados: al pedir la página de login,
-    si el sitio todavía muestra el formulario con el campo de contraseña,
-    la sesión NO está iniciada. Ajusta si el sitio se comporta distinto.
+    Busca en la página de login el formulario que tiene el campo de contraseña
+    y devuelve los nombres de campos y los campos ocultos (tokens, etc.).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for form in soup.find_all("form"):
+        pw = form.find("input", {"type": "password"})
+        if not pw:
+            continue
+        ocultos = {}
+        campo_user = None
+        for inp in form.find_all("input"):
+            nombre = inp.get("name")
+            if not nombre:
+                continue
+            tipo = (inp.get("type") or "text").lower()
+            if tipo in ("hidden", "submit"):
+                ocultos[nombre] = inp.get("value", "")
+            elif tipo in ("text", "email") and campo_user is None:
+                campo_user = nombre
+        return {
+            "user_field": campo_user,
+            "pass_field": pw.get("name"),
+            "ocultos": ocultos,
+            "action": form.get("action") or "",
+        }
+    return None
+
+
+def sesion_activa(sess, origin):
+    """
+    Verifica la sesión pidiendo la página principal (no la de login, porque
+    el sitio puede seguir mostrando /login aunque ya estemos dentro).
     """
     try:
-        r = sess.get(login_page_url, headers=HEADERS_COMUNES, timeout=TIMEOUT)
+        r = sess.get(origin + "/", headers=HEADERS_COMUNES, timeout=TIMEOUT)
         r.raise_for_status()
     except Exception as e:
         log(f"❌ Error verificando sesión: {e}")
         return False
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    hay_form_login = soup.find("input", {"name": "pass"}) is not None
-    return not hay_form_login
+    tiene_pass, tiene_logout = analizar_html(r.text)
+    log(f"🔎 Verificación (home) -> URL final: {r.url} | campo password: {tiene_pass} "
+        f"| enlace de cerrar sesión: {tiene_logout}")
+
+    if tiene_logout:
+        return True
+    return not tiene_pass and "login" not in r.url.lower()
 
 
 def hacer_login(sess, login_page_url, usuario, password):
-    origin, login_post_url = urls_desde_login(login_page_url)
+    origin, login_post_url, redirect = urls_desde_login(login_page_url)
     try:
         r0 = sess.get(login_page_url, headers=HEADERS_COMUNES, timeout=TIMEOUT)
         r0.raise_for_status()
@@ -125,12 +177,21 @@ def hacer_login(sess, login_page_url, usuario, password):
         log(f"❌ Error al cargar la página de login: {e}")
         return False
 
-    payload = {
-        "nick": usuario,
-        "pass": password,
-        "connect": "",
-        "redirect": "/",
-    }
+    form = detectar_formulario(r0.text)
+    if form:
+        log(f"🔎 Formulario detectado -> usuario: {form['user_field']} | "
+            f"password: {form['pass_field']} | action: {form['action']!r} | "
+            f"ocultos: {list(form['ocultos'].keys())}")
+        payload = dict(form["ocultos"])
+        payload[form["user_field"] or "nick"] = usuario
+        payload[form["pass_field"] or "pass"] = password
+    else:
+        log("⚠️ No se detectó formulario con campo de contraseña en la página de login "
+            "(puede que se genere con JavaScript). Uso los campos por defecto.")
+        payload = {"nick": usuario, "pass": password}
+    payload.setdefault("connect", "")
+    payload.setdefault("redirect", redirect)
+
     headers = {
         **HEADERS_COMUNES,
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -147,20 +208,20 @@ def hacer_login(sess, login_page_url, usuario, password):
         log(f"❌ Error al hacer login: {e}")
         return False
 
+    tiene_pass, tiene_logout = analizar_html(r.text)
+    log(f"🔎 POST -> {login_post_url} | HTTP {r.status_code} | URL final: {r.url} | "
+        f"campo password: {tiene_pass} | enlace de cerrar sesión: {tiene_logout}")
+    log(f"🔎 Cookies: {list(sess.cookies.get_dict().keys())}")
+
     if not sess.cookies.get_dict():
         log("⚠️ No se recibieron cookies de sesión.")
         return False
 
-    if "login" in r.url.lower() and "usuario o contraseña" in r.text.lower():
+    if "usuario o contraseña" in r.text.lower():
         log("❌ Usuario o contraseña inválidos.")
         return False
 
-    # Confirmación final: ¿el sitio nos reconoce como logueados?
-    if not sesion_activa(sess, login_page_url):
-        log("❌ El sitio sigue mostrando el formulario de login.")
-        return False
-
-    return True
+    return sesion_activa(sess, origin)
 
 
 def probar_login():
